@@ -159,12 +159,41 @@ func outOfOrder(l *list.List) {
         }
 }
 
-func mp3_play_process(cs chan byte, loop *C.GMainLoop) {
+func SinglePlayProcess(fpath string, loop *C.GMainLoop) {
+        // fmt.Printf("filename[%s]\n", fpath)
+        var pipeline *C.GstElement // 定义组件
+        var bus *C.GstBus
+
+        v0 := GString("playbin")
+        v1 := GString("play")
+        pipeline = C.gst_element_factory_make(v0, v1)
+        GFree(unsafe.Pointer(v0))
+        GFree(unsafe.Pointer(v1))
+        v2 := GString(fpath)
+        C.set_path(unsafe.Pointer(pipeline), v2)
+        GFree(unsafe.Pointer(v2))
+
+        // 得到 管道的消息总线
+        bus = C.pipeline_get_bus(unsafe.Pointer(pipeline))
+        if bus == (*C.GstBus)(nil) {
+                fmt.Println("GstBus element could not be created.Exiting.")
+                return
+        }
+        C.bus_add_watch(unsafe.Pointer(bus), unsafe.Pointer(loop))
+
+        C.mp3_ready(unsafe.Pointer(pipeline))
+        C.mp3_play(unsafe.Pointer(pipeline))
+
+        // 开始循环
+        C.g_main_loop_run(loop)
+        C.mp3_stop(unsafe.Pointer(pipeline))
+        C.object_unref(unsafe.Pointer(pipeline))
+}
+
+func PlayProcess(cs chan byte, loop *C.GMainLoop) {
         wg := new(sync.WaitGroup)
-        sig_in := make(chan bool)
         sig_out := make(chan bool)
 
-        defer close(sig_in)
         defer close(sig_out)
         defer g_wg.Done()
         if g_isOutOfOrder {
@@ -211,19 +240,13 @@ func mp3_play_process(cs chan byte, loop *C.GMainLoop) {
                                 C.mp3_stop(unsafe.Pointer(p))
                                 C.object_unref(unsafe.Pointer(p))
 
-                                select {
-                                case c := <-sig_in:
-                                        if c {
-                                                return
-                                        }
-                                default:
-                                        e = e.Next()
-                                        if e == nil {
-                                                sig_out <- true
-                                                return
-                                        }
+                                e = e.Next()
+                                if e == nil {
+                                        sig_out <- true
+                                } else {
+                                        sig_out <- false
                                 }
-                                sig_out <- false
+
                         }(pipeline)
                         lb := true
                         for lb {
@@ -239,21 +262,20 @@ func mp3_play_process(cs chan byte, loop *C.GMainLoop) {
                                                         e = e.Next()
                                                 }
                                                 C.g_main_loop_quit(loop)
-                                                sig_in <- false
                                         case 'p':
                                                 if e != start {
                                                         e = e.Prev()
                                                 }
                                                 C.g_main_loop_quit(loop)
-                                                sig_in <- false
                                         case 'q':
                                                 C.g_main_loop_quit(loop)
-                                                sig_in <- true
+                                                <-sig_out
                                                 wg.Wait()
                                                 return
                                         }
                                 case c := <-sig_out:
                                         if c {
+                                                wg.Wait()
                                                 return
                                         } else {
                                                 lb = false
@@ -261,6 +283,9 @@ func mp3_play_process(cs chan byte, loop *C.GMainLoop) {
                                 }
                         }
                         wg.Wait()
+                } else {
+                        // 路径非法
+                        return
                 }
 
         }
@@ -270,11 +295,28 @@ func main() {
         var loop *C.GMainLoop
         var s0 byte
         mdir := ""
+        mfile := ""
 
-        flag.StringVar(&mdir, "mdir", "", "mp3文件目录")
+        flag.StringVar(&mdir, "dir", "", "mp3文件目录")
+        flag.StringVar(&mfile, "file", "", "mp3文件")
         flag.BoolVar(&g_isOutOfOrder, "rand", false, "是否乱序播放")
         flag.Parse()
 
+        if mfile != "" {
+                p, err := filepath.Abs(mfile)
+                if err != nil {
+                        fmt.Printf("Error: %v\n", err)
+                        return
+                }
+                C.gst_init((*C.int)(unsafe.Pointer(nil)),
+                        (***C.char)(unsafe.Pointer(nil)))
+                loop = C.g_main_loop_new((*C.GMainContext)(unsafe.Pointer(nil)),
+                        C.gboolean(0)) // 创建主循环，在执行 g_main_loop_run后正式开始循环
+                mfile = fmt.Sprintf("file://%s", p)
+
+                SinglePlayProcess(mfile, loop)
+                return
+        }
         if mdir == "" {
                 flag.PrintDefaults()
                 return
@@ -293,30 +335,33 @@ func main() {
         g_wg.Add(1)
         s := make(chan byte)
         defer close(s)
-        go mp3_play_process(s, loop)
-LOOP0:
-        for {
-                fmt.Fscanf(os.Stdin, "%c\n", &s0)
-                switch s0 {
-                case 's':
-                        s <- s0
-                case 'r':
-                        s <- s0
-                case 'n':
-                        s <- s0
-                case 'p':
-                        s <- s0
-                case 'q':
-                        s <- s0
-                        break LOOP0
-                case 'h':
-                        fmt.Print("'s' -> 暂停\n" +
-                                "'r' -> 继续\n" +
-                                "'n' -> 下一首\n" +
-                                "'p' -> 上一首\n" +
-                                "'q' -> 退出\n")
+        go PlayProcess(s, loop)
+        go func() {
+        LOOP0:
+                for {
+                        fmt.Fscanf(os.Stdin, "%c\n", &s0)
+                        switch s0 {
+                        case 's':
+                                s <- s0
+                        case 'r':
+                                s <- s0
+                        case 'n':
+                                s <- s0
+                        case 'p':
+                                s <- s0
+                        case 'q':
+                                s <- s0
+                                break LOOP0
+                        case 'h':
+                                fmt.Print("'s' -> 暂停\n" +
+                                        "'r' -> 继续\n" +
+                                        "'n' -> 下一首\n" +
+                                        "'p' -> 上一首\n" +
+                                        "'q' -> 退出\n")
+                        }
+                        s0 = 0
                 }
-                s0 = 0
-        }
+
+        }()
         g_wg.Wait()
 }
