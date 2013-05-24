@@ -1,6 +1,7 @@
 package main
 
 import (
+        "fmt"
         "gtk"
         "os"
         "unsafe"
@@ -16,7 +17,11 @@ func main() {
         win.Connect("destroy", func() {
                 gtk.MainQuit()
         })
-        win.SetTitle("Hello World")
+        s := fmt.Sprintf("Gtk Version %d.%d.%d",
+                gtk.GetMajorVersion(), gtk.GetMinorVersion(),
+                gtk.GetMicroVersion())
+        win.SetTitle(s)
+        win.SetDefaultSize(100, 100)
         cn := gtk.ToContainer(unsafe.Pointer(win.CType()))
         cn.SetBorderWidth(10)
         // cn.SetResizeMode(gtk.RESIZE_PARENT)
